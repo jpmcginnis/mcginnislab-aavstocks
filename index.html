@@ -279,7 +279,7 @@ const CONFIG = {
   baseId:   'appfINZ7timRX5B6c',
   tableId:  'tblGbgNKxxWkrLSTl',
   viewId:   'viwSK52HzUm2XkYg6',
-  pat:      'REPLACE_WITH_AIRTABLE_READONLY_PAT',
+  pat:      'patEncCWneaDOU37F.e3069e26f5d8887fde55ae80570141c25b5f07876c1a79fffb28602f944318aa',
 };
 
 // --- Titer parser (fallback: parses the raw 'Viral titer (GC/ml)' field if split fields aren't populated yet) ---
@@ -358,21 +358,24 @@ async function fetchAll() {
 // --- Normalize a record to a display row (prefer split fields if present, else parse raw) ---
 function toRow(rec) {
   const f = rec.fields;
-  const location = f['Location'] || '';
-  const tube = f['Tube'] || '';
-  const virus = f['Virus Genome'] || '';
-  const capsid = f['Capsid'] || '';
+  // Skip empty-slot records (no virus genome)
+  if (!f['Virus Genome']) return null;
+  const location = (f['Location'] || '').trim();
+  const tube = (f['Tube'] || '').trim();
+  const virus = (f['Virus Genome'] || '').trim();
+  const capsid = (f['Capsid'] || '').trim();
   const deposit = f['Deposit'] || '';
 
   // Prefer split fields; fall back to in-browser parse of raw
   let batch = {};
-  if (f['Titer 1 (GC/mL)'] !== undefined && f['Titer 1 (GC/mL)'] !== null) {
+  const hasSplit = f['Status'] !== undefined || f['Titer 1 (GC/mL)'] !== undefined;
+  if (hasSplit) {
     batch = {
       status: f['Status'] || 'available',
       titer_1: f['Titer 1 (GC/mL)'] ?? null,
-      volume_1: f['Volume 1 (µL)'] ?? null,
+      volume_1: f['Volume 1 (uL)'] ?? null,
       titer_2: f['Titer 2 (GC/mL)'] ?? null,
-      volume_2: f['Volume 2 (µL)'] ?? null,
+      volume_2: f['Volume 2 (uL)'] ?? null,
       marker_2: f['Marker 2'] ?? null,
       marker_2_date: f['Marker 2 date'] ?? null,
       raw: f['Raw titer notes'] ?? f['Viral titer (GC/ml)'] ?? '',
@@ -472,7 +475,7 @@ async function init() {
   }
   try {
     const records = await fetchAll();
-    ALL = records.map(toRow);
+    ALL = records.map(toRow).filter(Boolean);
 
     // Populate location filter
     const locs = Array.from(new Set(ALL.map(r => r.location).filter(Boolean))).sort();
