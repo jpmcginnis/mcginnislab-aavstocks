@@ -100,7 +100,7 @@
     border-collapse: collapse;
     font-size: 13px;
   }
-  thead { position: sticky; top: 92px; background: var(--bg); z-index: 5; }
+  thead { position: sticky; top: var(--header-h, 92px); background: var(--bg); z-index: 5; }
   th {
     text-align: left;
     padding: 8px 10px;
@@ -765,6 +765,14 @@ async function init() {
     document.getElementById('loc-filter').addEventListener('change', render);
     document.getElementById('status-filter').addEventListener('change', render);
     render();
+
+    // Measure header height for sticky table-header offset; re-measure on resize.
+    const setHeaderOffset = () => {
+      const h = document.querySelector('header').offsetHeight;
+      document.documentElement.style.setProperty('--header-h', h + 'px');
+    };
+    setHeaderOffset();
+    window.addEventListener('resize', setHeaderOffset);
   } catch (e) {
     document.getElementById('loading').style.display = 'none';
     document.getElementById('error').style.display = 'block';
