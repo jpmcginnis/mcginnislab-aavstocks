@@ -199,6 +199,47 @@
   .edit-link:hover { text-decoration: underline; }
   tr.row-empty td, tr.row-no-virus td { background: #fafafa; }
   tr.row-empty .virus, tr.row-no-virus .virus { opacity: 0.6; }
+  td.num { text-align: center; font-family: ui-monospace, "SF Mono", Menlo, monospace; font-weight: 600; white-space: nowrap; }
+  .count {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 12px;
+    min-width: 28px;
+    text-align: center;
+  }
+  .count.count-ok   { background: var(--ok-bg); color: var(--ok-fg); }
+  .count.count-low  { background: #fff3cd; color: #8a5a00; }
+  .count.count-zero { background: #fde0e0; color: #a01818; }
+  .action-badge {
+    display: inline-block;
+    padding: 2px 7px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 500;
+    white-space: normal;
+    max-width: 180px;
+    line-height: 1.3;
+  }
+  .action-badge.ok      { background: var(--ok-bg); color: var(--ok-fg); font-weight: 600; }
+  .action-badge.yellow  { background: #fff3cd; color: #664d03; }
+  .action-badge.red     { background: #fde0e0; color: #a01818; font-weight: 600; }
+  .action-badge.generic { background: #e4e4e4; color: #555; }
+  .titer.tracker-titer { color: var(--accent); }
+  .section-title {
+    margin: 32px 0 10px;
+    font-size: 13px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    color: var(--warn-fg);
+    padding: 6px 10px;
+    background: var(--warn-bg);
+    border-radius: 4px;
+    display: inline-block;
+  }
+  .section-count { font-weight: 400; opacity: 0.7; margin-left: 4px; }
+  tr.tracker-only td { background: #fffaf0; }
   #loading, #error {
     padding: 40px;
     text-align: center;
@@ -270,6 +311,8 @@ const CONFIG = {
   tableId:  'tblGbgNKxxWkrLSTl',
   viewId:   'viwSK52HzUm2XkYg6',
   pat:      'patEncCWneaDOU37F.e3069e26f5d8887fde55ae80570141c25b5f07876c1a79fffb28602f944318aa',
+  trackerLocationsCsv: 'https://docs.google.com/spreadsheets/d/e/2PACX-1vT89SnFMc1367o-tWgqtNIuxw8qfcYR5wkCe0TPiFItHZLTZWtiQC6wgUaVaPF3vpv3qGyiXwqLuzeV/pub?gid=1368733165&single=true&output=csv',
+  trackerTitersCsv:    'https://docs.google.com/spreadsheets/d/e/2PACX-1vT89SnFMc1367o-tWgqtNIuxw8qfcYR5wkCe0TPiFItHZLTZWtiQC6wgUaVaPF3vpv3qGyiXwqLuzeV/pub?gid=754291894&single=true&output=csv',
 };
 
 // --- Titer parser (fallback: parses the raw 'Viral titer (GC/ml)' field if split fields aren't populated yet) ---
@@ -326,6 +369,99 @@ function markerClass(marker) {
   return c ? c[0].toLowerCase() : 'generic';
 }
 
+// --- Tracker (Google Sheets) parsing ---
+function parseCsv(txt) {
+  // Minimal RFC4180 parser (handles quoted fields with commas/newlines/escaped quotes)
+  const rows = [[]];
+  let field = '', inQ = false;
+  for (let i = 0; i < txt.length; i++) {
+    const c = txt[i];
+    if (inQ) {
+      if (c === '"' && txt[i + 1] === '"') { field += '"'; i++; }
+      else if (c === '"') inQ = false;
+      else field += c;
+    } else {
+      if (c === '"') inQ = true;
+      else if (c === ',') { rows[rows.length - 1].push(field); field = ''; }
+      else if (c === '\r') {}
+      else if (c === '\n') { rows[rows.length - 1].push(field); field = ''; rows.push([]); }
+      else field += c;
+    }
+  }
+  rows[rows.length - 1].push(field);
+  if (rows[rows.length - 1].length === 1 && rows[rows.length - 1][0] === '') rows.pop();
+  const header = rows.shift().map(h => (h || '').replace(/^﻿/, '').trim());
+  return rows.map(r => Object.fromEntries(header.map((h, i) => [h, r[i] ?? ''])));
+}
+
+function parseTrackerLoc(s) {
+  // Return {location, tube} to match Airtable Location+Tube, or null if unparseable.
+  s = (s || '').trim();
+  if (!s || /^not aliquoted$/i.test(s)) return null;
+  // NC-X## e.g. NC-D2, NC-O10, NC-P15
+  let m = s.match(/^(NC-[A-Z])(\d+)$/i);
+  if (m) {
+    const letter = m[1].split('-')[1].toUpperCase();
+    return { location: `NC-${letter}`, tube: `${letter}${m[2]}` };
+  }
+  // JP-NC# with optional space/hyphen variants: JP-1C3, JP1-B3, JP-1 B4, JP-2A1
+  m = s.match(/^JP[-\s]*(\d+)[-\s]*([A-Z])\s*(\d+)$/i);
+  if (m) return { location: `JP-BOX${m[1]}`, tube: `${m[2].toUpperCase()}${m[3]}` };
+  return null;
+}
+
+function toTrackerBundle(locationsRows, titersRows) {
+  // Index titers by virus+library
+  const titerByKey = {};
+  for (const r of titersRows) {
+    const key = `${(r['Virus'] || '').trim()}|${(r['Library'] || '').trim()}`;
+    titerByKey[key] = {
+      vg_mL:    parseFloat(r['Titer (vg/mL)']) || null,
+      vg_uL:    parseFloat(r['Titer (vg/µL)']) || null,
+      date:     (r['Date titer updated'] || '').trim() || null,
+      notes:    (r['Notes'] || '').trim() || null,
+    };
+  }
+  // Build location-keyed index of tracker rows (joinable against Airtable)
+  const byAirtableLoc = {};
+  const unmatched = [];
+  for (const r of locationsRows) {
+    const rawLoc = (r['-80 location'] || '').trim();
+    const parsed = parseTrackerLoc(rawLoc);
+    const virus = (r['Virus'] || '').trim();
+    const library = (r['Library'] || '').trim();
+    const titer = titerByKey[`${virus}|${library}`] || {};
+    const entry = {
+      tracker_raw_loc: rawLoc,
+      tracker_virus: virus,
+      tracker_library: library,
+      tracker_variant: (r['Variant Sequence'] || '').trim() || null,
+      tubes_remaining: r['Stock tubes remaining'] === '' ? null : (parseFloat(r['Stock tubes remaining']) || 0),
+      minis_remaining: r['Minis remaining'] === '' ? null : (parseFloat(r['Minis remaining']) || 0),
+      action: (r['Action needed'] || '').trim() || null,
+      tracker_titer_mL: titer.vg_mL ?? null,
+      tracker_titer_uL: titer.vg_uL ?? null,
+      tracker_titer_date: titer.date,
+      tracker_titer_notes: titer.notes,
+    };
+    if (parsed) {
+      byAirtableLoc[`${parsed.location}|${parsed.tube}`] = entry;
+    } else {
+      unmatched.push(entry);
+    }
+  }
+  return { byAirtableLoc, unmatched };
+}
+
+function actionBadgeClass(action) {
+  if (!action) return 'generic';
+  const a = action.toLowerCase();
+  if (a === 'ok') return 'ok';
+  if (a.includes('make more') || a.includes('reorder') || a.includes('order')) return 'red';
+  if (a.includes('thaw') || a.includes('make') || a.includes('aliquot')) return 'yellow';
+  return 'generic';
+}
+
 // --- Fetch all records from Airtable (paginated) ---
 async function fetchAll() {
   const base = `https://api.airtable.com/v0/${CONFIG.baseId}/${CONFIG.tableId}`;
@@ -374,33 +510,56 @@ function toRow(rec) {
     batch = parseTiter(f['Viral titer (GC/ml)'] || '');
   }
 
+  // Join tracker data by Location+Tube
+  const trackerKey = `${location}|${tube}`;
+  const tracker = (TRACKER_BY_LOC && TRACKER_BY_LOC[trackerKey]) || {};
+
   return {
     id: rec.id,
     location, tube, virus, capsid, deposit,
     ...batch,
-    search: [location, tube, virus, capsid, batch.raw].join(' ').toLowerCase(),
+    tubes_remaining:   tracker.tubes_remaining ?? null,
+    minis_remaining:   tracker.minis_remaining ?? null,
+    action:            tracker.action ?? null,
+    tracker_titer_mL:  tracker.tracker_titer_mL ?? null,
+    tracker_titer_date:tracker.tracker_titer_date ?? null,
+    tracker_virus:     tracker.tracker_virus ?? null,
+    tracker_library:   tracker.tracker_library ?? null,
+    has_tracker:       !!tracker.tracker_virus,
+    search: [
+      location, tube, virus, capsid, batch.raw,
+      tracker.tracker_virus, tracker.tracker_library, tracker.action,
+    ].filter(Boolean).join(' ').toLowerCase(),
   };
 }
 
 // --- Rendering ---
 let ALL = [];
+let TRACKER_BY_LOC = {};         // keyed Location|Tube → tracker entry
+let TRACKER_UNMATCHED = [];      // tracker rows that couldn't resolve to an Airtable row
 const SORT = { col: 'location', dir: 'asc' };  // default: group-like, sorted by location+pos
 
 const COLS = [
-  { key: 'location', label: 'Location' },
-  { key: 'tube',     label: 'Pos' },
-  { key: 'virus',    label: 'Construct' },
-  { key: 'capsid',   label: 'Capsid' },
-  { key: 'titer_1',  label: 'Batch 1' },
-  { key: 'titer_2',  label: 'Batch 2' },
-  { key: 'status',   label: 'Status' },
-  { key: 'deposit',  label: 'Deposited' },
+  { key: 'location',         label: 'Location' },
+  { key: 'tube',             label: 'Pos' },
+  { key: 'virus',            label: 'Construct' },
+  { key: 'capsid',           label: 'Capsid' },
+  { key: 'tubes_remaining',  label: 'Stock' },
+  { key: 'minis_remaining',  label: 'Minis' },
+  { key: 'action',           label: 'Action' },
+  { key: 'tracker_titer_mL', label: 'Tracker titer' },
+  { key: 'titer_1',          label: 'Batch 1' },
+  { key: 'titer_2',          label: 'Batch 2' },
+  { key: 'status',           label: 'Status' },
+  { key: 'deposit',          label: 'Deposited' },
 ];
 
 function naturalPos(s) {
   const m = String(s || '').match(/^([A-Za-z]*)(\d+)/);
   return m ? [m[1], parseInt(m[2])] : [String(s || ''), 0];
 }
+
+const NUMERIC_COLS = new Set(['titer_1', 'titer_2', 'tracker_titer_mL', 'tubes_remaining', 'minis_remaining']);
 
 function cmp(a, b, col, dir) {
   let av = a[col], bv = b[col];
@@ -409,7 +568,7 @@ function cmp(a, b, col, dir) {
     const [al, an] = naturalPos(av);
     const [bl, bn] = naturalPos(bv);
     c = al.localeCompare(bl) || (an - bn);
-  } else if (col === 'titer_1' || col === 'titer_2') {
+  } else if (NUMERIC_COLS.has(col)) {
     // nulls last regardless of direction
     if (av == null && bv == null) c = 0;
     else if (av == null) return 1;
@@ -479,6 +638,10 @@ function render() {
       <td class="pos">${esc(r.tube)}</td>
       <td class="virus">${esc(r.virus)}</td>
       <td>${r.capsid ? `<span class="capsid">${esc(r.capsid)}</span>` : ''}</td>
+      <td class="num">${renderCount(r.tubes_remaining)}</td>
+      <td class="num">${renderCount(r.minis_remaining)}</td>
+      <td>${renderAction(r.action)}</td>
+      <td class="batch">${renderTrackerTiter(r.tracker_titer_mL, r.tracker_titer_date)}</td>
       <td class="batch">${renderBatch(r.titer_1, r.volume_1)}</td>
       <td class="batch">${renderBatch(r.titer_2, r.volume_2, r.marker_2, r.marker_2_date)}</td>
       <td><span class="status ${r.status.replace(' ', '-')}">${esc(r.status)}</span></td>
@@ -487,7 +650,34 @@ function render() {
     </tr>`;
   }).join('');
 
-  content.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+  // Tracker-only section (rows that didn't resolve to an Airtable location)
+  let unmatchedHtml = '';
+  if (TRACKER_UNMATCHED.length) {
+    const q = document.getElementById('search').value.trim().toLowerCase();
+    const umFiltered = q
+      ? TRACKER_UNMATCHED.filter(t => [t.tracker_virus, t.tracker_library, t.tracker_raw_loc, t.action].filter(Boolean).join(' ').toLowerCase().includes(q))
+      : TRACKER_UNMATCHED;
+    if (umFiltered.length) {
+      unmatchedHtml = `
+      <h2 class="section-title">Tracker-only — location not in Airtable catalog <span class="section-count">(${umFiltered.length})</span></h2>
+      <table><thead><tr>
+        <th>Tracker loc</th><th>Virus</th><th>Library</th>
+        <th>Stock</th><th>Minis</th><th>Action</th><th>Tracker titer</th>
+      </tr></thead><tbody>
+      ${umFiltered.map(t => `<tr class="tracker-only">
+        <td class="pos">${esc(t.tracker_raw_loc)}</td>
+        <td class="virus">${esc(t.tracker_virus)}</td>
+        <td>${esc(t.tracker_library)}</td>
+        <td class="num">${renderCount(t.tubes_remaining)}</td>
+        <td class="num">${renderCount(t.minis_remaining)}</td>
+        <td>${renderAction(t.action)}</td>
+        <td class="batch">${renderTrackerTiter(t.tracker_titer_mL, t.tracker_titer_date)}</td>
+      </tr>`).join('')}
+      </tbody></table>`;
+    }
+  }
+
+  content.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>${unmatchedHtml}`;
 
   // Wire sort clicks
   content.querySelectorAll('th[data-col]').forEach(th => {
@@ -513,6 +703,25 @@ function renderBatch(titer, vol, marker, date) {
   return out;
 }
 
+function renderTrackerTiter(titer_mL, date) {
+  if (titer_mL === null || titer_mL === undefined) return '<span style="color:var(--soft)">—</span>';
+  let out = `<span class="titer tracker-titer">${fmtTiter(titer_mL)}</span>`;
+  if (date) out += `<br><span class="vol" style="font-size:10px">updated ${esc(date)}</span>`;
+  return out;
+}
+
+function renderCount(n) {
+  if (n === null || n === undefined) return '<span style="color:var(--soft)">—</span>';
+  const cls = n === 0 ? 'count-zero' : (n <= 3 ? 'count-low' : 'count-ok');
+  return `<span class="count ${cls}">${n}</span>`;
+}
+
+function renderAction(action) {
+  if (!action) return '<span style="color:var(--soft)">—</span>';
+  const cls = actionBadgeClass(action);
+  return `<span class="action-badge ${cls}">${esc(action)}</span>`;
+}
+
 function esc(s) {
   if (s === null || s === undefined) return '';
   return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -527,7 +736,19 @@ async function init() {
     return;
   }
   try {
-    const records = await fetchAll();
+    // Fetch Airtable + tracker CSVs in parallel
+    const [records, trackerLocCsv, trackerTiterCsv] = await Promise.all([
+      fetchAll(),
+      fetch(CONFIG.trackerLocationsCsv).then(r => r.ok ? r.text() : Promise.reject(new Error(`Tracker Locations ${r.status}`))),
+      fetch(CONFIG.trackerTitersCsv).then(r => r.ok ? r.text() : Promise.reject(new Error(`Tracker Titers ${r.status}`))),
+    ]);
+
+    const trackerLocRows = parseCsv(trackerLocCsv);
+    const trackerTiterRows = parseCsv(trackerTiterCsv);
+    const { byAirtableLoc, unmatched } = toTrackerBundle(trackerLocRows, trackerTiterRows);
+    TRACKER_BY_LOC = byAirtableLoc;
+    TRACKER_UNMATCHED = unmatched;
+
     ALL = records.map(toRow).filter(Boolean);
 
     // Populate location filter
@@ -536,7 +757,9 @@ async function init() {
     for (const l of locs) sel.add(new Option(l, l));
 
     document.getElementById('loading').style.display = 'none';
-    document.getElementById('sync-status').textContent = `${ALL.length} stocks · synced ${new Date().toLocaleTimeString()}`;
+    const trackedCount = ALL.filter(r => r.has_tracker).length;
+    document.getElementById('sync-status').textContent =
+      `${ALL.length} stocks · ${trackedCount} tracked · synced ${new Date().toLocaleTimeString()}`;
 
     document.getElementById('search').addEventListener('input', render);
     document.getElementById('loc-filter').addEventListener('change', render);
