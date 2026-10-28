@@ -95,33 +95,15 @@
     font-family: ui-monospace, "SF Mono", Menlo, monospace;
   }
   main { padding: 16px 24px 60px; }
-  .location-group { margin-bottom: 28px; }
-  .location-group h2 {
-    font-size: 13px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    margin: 0 0 8px 0;
-    padding-bottom: 4px;
-    border-bottom: 1px solid var(--border);
-  }
-  .location-group h2 .count {
-    font-weight: 400;
-    color: var(--soft);
-    text-transform: none;
-    letter-spacing: 0;
-    font-size: 11px;
-    margin-left: 6px;
-  }
   table {
     width: 100%;
     border-collapse: collapse;
     font-size: 13px;
   }
+  thead { position: sticky; top: 92px; background: var(--bg); z-index: 5; }
   th {
     text-align: left;
-    padding: 6px 10px;
+    padding: 8px 10px;
     font-size: 11px;
     font-weight: 600;
     text-transform: uppercase;
@@ -129,7 +111,15 @@
     color: var(--muted);
     border-bottom: 1px solid var(--border);
     white-space: nowrap;
+    cursor: pointer;
+    user-select: none;
+    background: var(--bg);
   }
+  th:hover { color: var(--fg); }
+  th.sortable::after { content: ' ↕'; opacity: 0.3; font-size: 10px; }
+  th.sort-asc::after  { content: ' ▲'; opacity: 1; color: var(--accent); font-size: 10px; }
+  th.sort-desc::after { content: ' ▼'; opacity: 1; color: var(--accent); font-size: 10px; }
+  tr.loc-boundary td { border-top: 2px solid var(--border); }
   td {
     padding: 10px;
     border-bottom: 1px solid var(--border);
@@ -394,6 +384,60 @@ function toRow(rec) {
 
 // --- Rendering ---
 let ALL = [];
+const SORT = { col: 'location', dir: 'asc' };  // default: group-like, sorted by location+pos
+
+const COLS = [
+  { key: 'location', label: 'Location' },
+  { key: 'tube',     label: 'Pos' },
+  { key: 'virus',    label: 'Construct' },
+  { key: 'capsid',   label: 'Capsid' },
+  { key: 'titer_1',  label: 'Batch 1' },
+  { key: 'titer_2',  label: 'Batch 2' },
+  { key: 'status',   label: 'Status' },
+  { key: 'deposit',  label: 'Deposited' },
+];
+
+function naturalPos(s) {
+  const m = String(s || '').match(/^([A-Za-z]*)(\d+)/);
+  return m ? [m[1], parseInt(m[2])] : [String(s || ''), 0];
+}
+
+function cmp(a, b, col, dir) {
+  let av = a[col], bv = b[col];
+  let c;
+  if (col === 'tube') {
+    const [al, an] = naturalPos(av);
+    const [bl, bn] = naturalPos(bv);
+    c = al.localeCompare(bl) || (an - bn);
+  } else if (col === 'titer_1' || col === 'titer_2') {
+    // nulls last regardless of direction
+    if (av == null && bv == null) c = 0;
+    else if (av == null) return 1;
+    else if (bv == null) return -1;
+    else c = av - bv;
+  } else if (col === 'deposit') {
+    const ad = av ? new Date(av).getTime() : 0;
+    const bd = bv ? new Date(bv).getTime() : 0;
+    if (!ad && !bd) c = 0;
+    else if (!ad) return 1;
+    else if (!bd) return -1;
+    else c = ad - bd;
+  } else {
+    av = String(av || ''); bv = String(bv || '');
+    c = av.localeCompare(bv);
+  }
+  return dir === 'asc' ? c : -c;
+}
+
+function multiSort(rows) {
+  // Primary = SORT col/dir. Tiebreak = Location asc, then Pos asc (so default feels grouped).
+  return rows.sort((a, b) => (
+    cmp(a, b, SORT.col, SORT.dir) ||
+    (SORT.col !== 'location' ? cmp(a, b, 'location', 'asc') : 0) ||
+    (SORT.col !== 'tube'     ? cmp(a, b, 'tube', 'asc')     : 0)
+  ));
+}
+
 function render() {
   const q = document.getElementById('search').value.trim().toLowerCase();
   const locFilter = document.getElementById('loc-filter').value;
@@ -406,49 +450,58 @@ function render() {
   });
   document.getElementById('count').textContent = `${filtered.length} / ${ALL.length}`;
 
-  // Group by location
-  const groups = {};
-  for (const r of filtered) {
-    (groups[r.location] = groups[r.location] || []).push(r);
-  }
-  const sortedLocs = Object.keys(groups).sort();
-
   const content = document.getElementById('content');
   if (filtered.length === 0) {
     content.innerHTML = '<p style="color:var(--muted); padding:40px; text-align:center;">No stocks match your filter.</p>';
     return;
   }
 
-  let html = '';
-  for (const loc of sortedLocs) {
-    const items = groups[loc].sort((a, b) => a.tube.localeCompare(b.tube, undefined, { numeric: true }));
-    html += `<section class="location-group"><h2>${esc(loc)} <span class="count">(${items.length})</span></h2>`;
-    html += `<table><thead><tr>
-      <th>Pos</th>
-      <th>Construct</th>
-      <th>Capsid</th>
-      <th>Batch 1</th>
-      <th>Batch 2</th>
-      <th>Status</th>
-      <th>Deposited</th>
-      <th></th>
-    </tr></thead><tbody>`;
-    for (const r of items) {
-      const rowCls = r.status === 'empty' ? 'row-empty' : (r.status === 'no virus' ? 'row-no-virus' : '');
-      html += `<tr class="${rowCls}">
-        <td class="pos">${esc(r.tube)}</td>
-        <td class="virus">${esc(r.virus)}</td>
-        <td>${r.capsid ? `<span class="capsid">${esc(r.capsid)}</span>` : ''}</td>
-        <td class="batch">${renderBatch(r.titer_1, r.volume_1)}</td>
-        <td class="batch">${renderBatch(r.titer_2, r.volume_2, r.marker_2, r.marker_2_date)}</td>
-        <td><span class="status ${r.status.replace(' ', '-')}">${esc(r.status)}</span></td>
-        <td class="deposit">${esc(r.deposit || '')}</td>
-        <td><a class="edit-link" href="https://airtable.com/${CONFIG.baseId}/${CONFIG.tableId}/${r.id}" target="_blank" rel="noopener">edit ↗</a></td>
-      </tr>`;
-    }
-    html += `</tbody></table></section>`;
-  }
-  content.innerHTML = html;
+  multiSort(filtered);
+
+  // Header row with sort indicators
+  const headerHtml = COLS.map(c => {
+    let cls = 'sortable';
+    if (SORT.col === c.key) cls = SORT.dir === 'asc' ? 'sort-asc' : 'sort-desc';
+    return `<th class="${cls}" data-col="${c.key}">${esc(c.label)}</th>`;
+  }).join('') + '<th></th>';
+
+  // Body rows
+  let lastLoc = null;
+  const bodyHtml = filtered.map(r => {
+    const rowCls = [];
+    if (r.status === 'empty') rowCls.push('row-empty');
+    else if (r.status === 'no virus') rowCls.push('row-no-virus');
+    // Add a thin border between consecutive different locations (visual grouping)
+    if (SORT.col === 'location' && r.location !== lastLoc) rowCls.push('loc-boundary');
+    lastLoc = r.location;
+    return `<tr class="${rowCls.join(' ')}">
+      <td class="pos">${esc(r.location)}</td>
+      <td class="pos">${esc(r.tube)}</td>
+      <td class="virus">${esc(r.virus)}</td>
+      <td>${r.capsid ? `<span class="capsid">${esc(r.capsid)}</span>` : ''}</td>
+      <td class="batch">${renderBatch(r.titer_1, r.volume_1)}</td>
+      <td class="batch">${renderBatch(r.titer_2, r.volume_2, r.marker_2, r.marker_2_date)}</td>
+      <td><span class="status ${r.status.replace(' ', '-')}">${esc(r.status)}</span></td>
+      <td class="deposit">${esc(r.deposit || '')}</td>
+      <td><a class="edit-link" href="https://airtable.com/${CONFIG.baseId}/${CONFIG.tableId}/${r.id}" target="_blank" rel="noopener">edit ↗</a></td>
+    </tr>`;
+  }).join('');
+
+  content.innerHTML = `<table><thead><tr>${headerHtml}</tr></thead><tbody>${bodyHtml}</tbody></table>`;
+
+  // Wire sort clicks
+  content.querySelectorAll('th[data-col]').forEach(th => {
+    th.addEventListener('click', () => {
+      const col = th.dataset.col;
+      if (SORT.col === col) {
+        SORT.dir = SORT.dir === 'asc' ? 'desc' : 'asc';
+      } else {
+        SORT.col = col;
+        SORT.dir = 'asc';
+      }
+      render();
+    });
+  });
 }
 
 function renderBatch(titer, vol, marker, date) {
